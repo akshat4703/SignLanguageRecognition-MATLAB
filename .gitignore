@@ -1,0 +1,24 @@
+# MATLAB generated files
+*.asv
+*.fig
+*.mat
+*.mex*
+*.mlappinstall
+*.mlpkginstall
+*.slxc
+*.slx
+*.mdl
+*.autosave
+*.bak
+
+# MATLAB code analysis cache
+codegen/
+.slprj/
+.simulink/
+
+# Mac OS and system files
+.DS_Store
+Thumbs.db
+
+# Dataset (optional to ignore large dataset files)
+DATASET/
