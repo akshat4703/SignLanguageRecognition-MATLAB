@@ -1,0 +1,148 @@
+clear; clc; close all;
+fprintf('Starting Sign Language Prediction Script...\n');
+datasetPath = '/MATLAB Drive/DATASET'; 
+
+modelFileName = 'aslAZClassifier_HOG.mat';
+
+if ~exist(modelFileName, 'file')
+    error('Model file "%s" not found. Please run the training script first.', modelFileName);
+end
+fprintf('Loading trained model from %s...\n', modelFileName);
+load(modelFileName, 'classifier', 'featureLength', 'targetSize', 'cellSize');
+if ~exist('classifier', 'var') || ~exist('targetSize', 'var') || ~exist('cellSize', 'var')
+     error('Loaded model file "%s" is missing required variables (classifier, targetSize, cellSize).', modelFileName);
+end
+fprintf('Model loaded successfully.\n');
+fprintf('Using parameters - TargetSize: [%d %d], CellSize: [%d %d]\n', ...
+    targetSize(1), targetSize(2), cellSize(1), cellSize(2));
+
+function features = preprocessAndExtractHOG_AZ(img, targetSize, cellSize)
+    imgResized = imresize(img, targetSize);
+    if size(imgResized, 3) == 3, imgGray = rgb2gray(imgResized);
+    else, imgGray = imgResized; end
+    try
+        features = extractHOGFeatures(imgGray, 'CellSize', cellSize);
+    catch ME
+        warning('HOG extraction failed: %s. Returning zeros.', ME.message);
+        numCells = floor(targetSize ./ cellSize); featuresPerCell = 31;
+        expectedLength = prod(numCells) * featuresPerCell;
+        features = zeros(1, expectedLength, 'single');
+    end
+end
+
+rerun_validation = true;
+
+if rerun_validation
+    fprintf('\nRe-evaluating model performance on the validation set...\n');
+
+    if ~exist(datasetPath, 'dir')
+        warning('Dataset path "%s" not found. Skipping re-evaluation.', datasetPath);
+    else
+
+        imds = imageDatastore(datasetPath, ...
+            'IncludeSubfolders', true, ...
+            'LabelSource', 'foldernames');
+
+        [~, imdsValidation] = splitEachLabel(imds, 0.7, 'randomized'); 
+        fprintf('%d validation images loaded for re-evaluation.\n', numel(imdsValidation.Files));
+
+        numValidationImages = numel(imdsValidation.Files);
+        validationFeatures = zeros(numValidationImages, featureLength, 'single');
+        validationLabels = imdsValidation.Labels;
+
+        fprintf('Extracting features from validation images for re-evaluation...\n');
+        tic;
+        parfor i = 1:numValidationImages 
+             try
+                img = readimage(imdsValidation, i);
+                validationFeatures(i, :) = preprocessAndExtractHOG_AZ(img, targetSize, cellSize);
+             catch ME
+                warning('Error processing validation image %d: %s. Skipping.', i, ME.message);
+             end
+        end
+        toc;
+
+        zeroRowsVal = find(all(validationFeatures == 0, 2));
+        validValIndices = setdiff(1:numValidationImages, zeroRowsVal);
+
+        if ~isempty(zeroRowsVal)
+            fprintf('WARNING: %d validation images failed feature extraction during re-evaluation.\n', numel(zeroRowsVal));
+        end
+
+        if isempty(validValIndices)
+            warning('No valid validation features extracted. Skipping re-evaluation results.');
+        else
+
+            predictedLabels = predict(classifier, validationFeatures(validValIndices,:));
+            actualLabels = validationLabels(validValIndices);
+
+            accuracy = mean(predictedLabels == actualLabels);
+            fprintf('\nRe-calculated Validation Accuracy: %.2f%%\n', accuracy * 100);
+
+            figure('Name', 'Prediction: Confusion Matrix (Validation Re-run)');
+            cm = confusionchart(actualLabels, predictedLabels);
+            cm.Title = sprintf('Validation Confusion Matrix (Re-run, Accuracy: %.2f%%)', accuracy * 100);
+            cm.RowSummary = 'row-normalized';
+        end
+    end
+else
+    fprintf('\nSkipping re-evaluation on validation set.\n');
+end
+
+fprintf('\nTesting prediction on individual sample images...\n');
+
+if ~exist('imdsValidation', 'var') || isempty(imdsValidation)
+     if ~exist(datasetPath, 'dir')
+         warning('Dataset path "%s" not found. Cannot load samples for individual testing.', datasetPath);
+         return; 
+     end
+     imds = imageDatastore(datasetPath, 'IncludeSubfolders', true, 'LabelSource', 'foldernames');
+     [~, imdsValidation] = splitEachLabel(imds, 0.7, 'randomized');
+     if isempty(imdsValidation.Files)
+         warning('Validation set is empty. Cannot perform individual tests.');
+         return;
+     end
+     fprintf('Loaded validation images for individual testing.\n');
+end
+
+numTestSamples = min(8, numel(imdsValidation.Files)); 
+if numTestSamples < 1
+    fprintf('No validation images available to test.\n');
+    return;
+end
+
+figure('Name', 'Prediction: Individual Samples');
+testImageIndices = randperm(numel(imdsValidation.Files), numTestSamples); 
+
+for i = 1:numTestSamples
+    idx = testImageIndices(i);
+    try
+
+        testImage = readimage(imdsValidation, idx);
+        trueLabel = imdsValidation.Labels(idx);
+
+        testFeatures = preprocessAndExtractHOG_AZ(testImage, targetSize, cellSize);
+
+        if all(testFeatures == 0) 
+            predictedLabelStr = 'Error';
+            warning('Feature extraction failed for sample image index %d. Cannot predict.', idx);
+        else
+            [predictedLabel, score] = predict(classifier, testFeatures);
+            predictedLabelStr = string(predictedLabel);
+        end
+
+        subplot(2, ceil(numTestSamples/2), i); 
+        imshow(testImage);
+        title(sprintf('True: %s\nPred: %s', string(trueLabel), predictedLabelStr), 'FontSize', 10);
+
+    catch ME
+         warning('Error processing/predicting sample image index %d: %s', idx, ME.message);
+         subplot(2, ceil(numTestSamples/2), i);
+         imshow(imread(imdsValidation.Files{idx})); 
+         title(sprintf('True: %s\nError Processing', string(imdsValidation.Labels(idx))), 'FontSize', 10);
+    end
+end
+sgtitle('Individual Image Test Results (from Validation Set)');
+
+
+fprintf('\n--- Prediction Script Finished ---\n');
